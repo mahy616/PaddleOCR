@@ -103,6 +103,8 @@ public:
 
   std::vector<std::unique_ptr<BaseCVResult>>
   Predict(const std::vector<std::string> &input) override;
+  std::vector<std::unique_ptr<BaseCVResult>>
+  Predict(const std::vector<cv::Mat> &input);
 
   std::vector<OCRPipelineResult> PipelineResult() const {
     return pipeline_result_vec_;
@@ -118,6 +120,13 @@ public:
   void OverrideConfig();
 
 private:
+  std::vector<std::unique_ptr<BaseCVResult>> BuildResults(
+      const std::vector<DocPreprocessorPipelineResult>
+          &doc_preprocessors_pipeline_results,
+      const std::vector<std::string> *det_input_paths,
+      const std::vector<std::string> *result_input_paths,
+      const std::unordered_map<std::string, bool> &model_settings);
+
   OCRPipelineParams params_;
   YamlConfig config_;
   std::unique_ptr<BaseBatchSampler> batch_sampler_ptr_;
@@ -154,6 +163,8 @@ public:
 
   std::vector<std::unique_ptr<BaseCVResult>>
   Predict(const std::vector<std::string> &input) override;
+  std::vector<std::unique_ptr<BaseCVResult>>
+  Predict(const std::vector<cv::Mat> &input);
 
 private:
   int thread_num_;

@@ -26,6 +26,11 @@ log/
 build/
 dist/
 paddleocr.egg-info/
+
+# Local C++ inference builds / downloaded third-party deps
+/deploy/cpp_infer/build*/
+/deploy/cpp_infer/third_party/
+
 /deploy/android_demo/app/OpenCV/
 /deploy/android_demo/app/PaddleLite/
 /deploy/android_demo/app/.cxx/

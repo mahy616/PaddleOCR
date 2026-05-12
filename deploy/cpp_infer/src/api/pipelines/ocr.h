@@ -64,6 +64,12 @@ public:
   };
   std::vector<std::unique_ptr<BaseCVResult>>
   Predict(const std::vector<std::string> &input);
+  std::vector<std::unique_ptr<BaseCVResult>> Predict(const cv::Mat &input) {
+    std::vector<cv::Mat> inputs = {input};
+    return Predict(inputs);
+  };
+  std::vector<std::unique_ptr<BaseCVResult>>
+  Predict(const std::vector<cv::Mat> &input);
 
   void CreatePipeline();
   absl::Status CheckParams();

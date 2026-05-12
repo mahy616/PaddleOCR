@@ -31,6 +31,10 @@ std::vector<std::unique_ptr<BaseCVResult>>
 PaddleOCR::Predict(const std::vector<std::string> &input) {
   return pipeline_infer_->Predict(input);
 }
+std::vector<std::unique_ptr<BaseCVResult>>
+PaddleOCR::Predict(const std::vector<cv::Mat> &input) {
+  return static_cast<OCRPipeline *>(pipeline_infer_.get())->Predict(input);
+}
 void PaddleOCR::CreatePipeline() {
   pipeline_infer_ = std::unique_ptr<BasePipeline>(
       new OCRPipeline(ToOCRPipelineParams(params_)));

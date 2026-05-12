@@ -32,16 +32,24 @@ TextDetPredictor::TextDetPredictor(const TextDetPredictorParams &params)
 
 absl::Status TextDetPredictor::Build() {
   const auto &pre_tfs = config_.PreProcessOpInfo();
-  // Register<ReadImage>("Read", pre_tfs.at("DecodeImage.img_mode"));
-  Register<ReadImage>("Read");
+  auto img_mode_iter = pre_tfs.find("DecodeImage.img_mode");
+  Register<ReadImage>(
+      "Read", img_mode_iter != pre_tfs.end() ? img_mode_iter->second : "RGB");
   DetResizeForTestParam resize_param;
   resize_param.input_shape = params_.input_shape;
   resize_param.max_side_limit = params_.max_side_limit;
   resize_param.limit_side_len = params_.limit_side_len;
   resize_param.limit_type = params_.limit_type;
   resize_param.max_side_limit = params_.max_side_limit;
-  resize_param.resize_long =
-      std::stoi(pre_tfs.at("DetResizeForTest.resize_long"));
+  auto resize_long_iter = pre_tfs.find("DetResizeForTest.resize_long");
+  if (resize_long_iter != pre_tfs.end() && !resize_long_iter->second.empty() &&
+      resize_long_iter->second != "null") {
+    resize_param.resize_long = std::stoi(resize_long_iter->second);
+    if (!params_.input_shape.has_value()) {
+      resize_param.limit_side_len = absl::nullopt;
+      resize_param.limit_type = absl::nullopt;
+    }
+  }
   Register<DetResizeForTest>("Resize", resize_param);
   Register<NormalizeImage>("Normalize");
   Register<ToCHWImage>("ToCHW");

@@ -273,6 +273,194 @@ std::unordered_map<std::string, bool> _OCRPipeline::GetModelSettings() const {
 }
 
 std::vector<std::unique_ptr<BaseCVResult>>
+_OCRPipeline::BuildResults(
+    const std::vector<DocPreprocessorPipelineResult>
+        &doc_preprocessors_pipeline_results,
+    const std::vector<std::string> *det_input_paths,
+    const std::vector<std::string> *result_input_paths,
+    const std::unordered_map<std::string, bool> &model_settings) {
+  std::vector<std::unique_ptr<BaseCVResult>> base_results = {};
+  std::vector<cv::Mat> doc_preprocessor_pipeline_images = {};
+  std::vector<cv::Mat> doc_preprocessor_pipeline_images_copy = {};
+  for (auto &item : doc_preprocessors_pipeline_results) {
+    doc_preprocessor_pipeline_images.push_back(item.output_image);
+    doc_preprocessor_pipeline_images_copy.push_back(item.output_image.clone());
+  }
+  if (det_input_paths != nullptr) {
+    text_det_model_->Predict(*det_input_paths);
+  } else {
+    text_det_model_->Predict(doc_preprocessor_pipeline_images_copy);
+  }
+  std::vector<TextDetPredictorResult> det_results =
+      static_cast<TextDetPredictor *>(text_det_model_.get())
+          ->PredictorResult();
+  std::vector<std::vector<std::vector<cv::Point2f>>> dt_polys_list = {};
+  for (auto &item : det_results) {
+    if (!item.dt_polys.empty()) {
+      auto sort_item = sort_boxes_(item.dt_polys);
+      dt_polys_list.push_back(sort_item);
+    } else {
+      dt_polys_list.push_back(std::vector<std::vector<cv::Point2f>>{});
+    }
+  }
+
+  std::vector<int> indices = {};
+  for (int j = 0; j < doc_preprocessor_pipeline_images.size(); j++) {
+    if (!dt_polys_list.empty() && !dt_polys_list[j].empty()) {
+      indices.push_back(j);
+    }
+  }
+  std::vector<OCRPipelineResult> results(
+      doc_preprocessor_pipeline_images.size());
+  for (int k = 0; k < results.size(); k++) {
+    if (result_input_paths != nullptr && k < result_input_paths->size()) {
+      results[k].input_path = (*result_input_paths)[k];
+    }
+    results[k].doc_preprocessor_res = doc_preprocessors_pipeline_results[k];
+    results[k].dt_polys = dt_polys_list[k];
+    results[k].model_settings = model_settings;
+    results[k].text_det_params = text_det_params_;
+    results[k].text_type = text_type_;
+    results[k].text_rec_score_thresh = text_rec_score_thresh_;
+  }
+  if (!indices.empty()) {
+    std::vector<cv::Mat> all_subs_of_imgs = {};
+    std::vector<cv::Mat> all_subs_of_imgs_copy = {};
+    std::vector<int> chunk_indices(1, 0);
+    for (auto &idx : indices) {
+      auto result_all_subs_of_img = (*crop_by_polys_)(
+          doc_preprocessor_pipeline_images[idx], dt_polys_list[idx]);
+      if (!result_all_subs_of_img.ok()) {
+        INFOE("Split image fail : ",
+              result_all_subs_of_img.status().ToString().c_str());
+        exit(-1);
+      }
+      all_subs_of_imgs.insert(all_subs_of_imgs.end(),
+                              result_all_subs_of_img.value().begin(),
+                              result_all_subs_of_img.value().end());
+      chunk_indices.emplace_back(chunk_indices.back() +
+                                 result_all_subs_of_img.value().size());
+    }
+    for (auto &item : all_subs_of_imgs) {
+      all_subs_of_imgs_copy.push_back(item.clone());
+    }
+    std::vector<int> angles = {};
+    if (model_settings.at("use_textline_orientation")) {
+      textline_orientation_model_->Predict(all_subs_of_imgs_copy);
+      auto textline_orientation_model_results =
+          static_cast<ClasPredictor *>(textline_orientation_model_.get())
+              ->PredictorResult();
+      textline_orientation_model_results[0].input_image;
+      for (auto &result_angle : textline_orientation_model_results) {
+        angles.push_back(result_angle.class_ids[0]);
+      }
+      auto result_all_subs_of_imgs = RotateImage(all_subs_of_imgs, angles);
+      if (!result_all_subs_of_imgs.ok()) {
+        INFOE("Rotate images fail : %s",
+              result_all_subs_of_imgs.status().ToString().c_str());
+        exit(-1);
+      }
+      all_subs_of_imgs = result_all_subs_of_imgs.value();
+    } else {
+      angles = std::vector<int>(all_subs_of_imgs.size(), -1);
+    }
+    for (int l = 0; l < indices.size(); l++) {
+      for (int m = chunk_indices[l]; m < chunk_indices[l + 1]; m++) {
+        results[indices[l]].textline_orientation_angles.push_back(angles[m]);
+      }
+    }
+    for (int l = 0; l < indices.size(); l++) {
+      std::vector<cv::Mat> all_subs_of_img = {};
+      for (int m = chunk_indices[l]; m < chunk_indices[l + 1]; m++) {
+        all_subs_of_img.push_back(all_subs_of_imgs[m]);
+      }
+      std::vector<std::pair<std::pair<int, float>, TextRecPredictorResult>>
+          sub_img_info_list = {};
+
+      for (int m = 0; m < all_subs_of_img.size(); m++) {
+        int sub_img_id = m;
+        float sub_img_ratio = (float)all_subs_of_img[m].size[1] /
+                              (float)all_subs_of_img[m].size[0];
+        TextRecPredictorResult result;
+        sub_img_info_list.push_back({{sub_img_id, sub_img_ratio}, result});
+      }
+      std::vector<std::pair<int, float>> sorted_subs_info = {};
+      for (auto &item : sub_img_info_list) {
+        sorted_subs_info.push_back(item.first);
+      }
+      std::sort(
+          sorted_subs_info.begin(), sorted_subs_info.end(),
+          [](const std::pair<int, float> &a, const std::pair<int, float> &b) {
+            return a.second < b.second;
+          });
+      std::vector<cv::Mat> sorted_subs_of_img = {};
+      for (auto &item : sorted_subs_info) {
+        sorted_subs_of_img.push_back(all_subs_of_img[item.first]);
+      }
+      text_rec_model_->Predict(sorted_subs_of_img);
+      auto text_rec_model_results =
+          static_cast<TextRecPredictor *>(text_rec_model_.get())
+              ->PredictorResult();
+      for (int m = 0; m < text_rec_model_results.size(); m++) {
+        int sub_img_id = sorted_subs_info[m].first;
+        sub_img_info_list[sub_img_id].second = text_rec_model_results[m];
+      }
+      for (int sno = 0; sno < sub_img_info_list.size(); sno++) {
+        auto rec_res = sub_img_info_list[sno].second;
+        if (rec_res.rec_score >= text_rec_score_thresh_) {
+          results[l].rec_texts.push_back(rec_res.rec_text);
+          results[l].rec_scores.push_back(rec_res.rec_score);
+          results[l].rec_polys.push_back(dt_polys_list[l][sno]);
+          results[l].vis_fonts = rec_res.vis_font;
+        }
+      }
+    }
+  }
+  for (auto &res : results) {
+    if (text_type_ == "general") {
+      res.rec_boxes = ComponentsProcessor::ConvertPointsToBoxes(res.rec_polys);
+    }
+    pipeline_result_vec_.push_back(res);
+    base_results.push_back(std::unique_ptr<BaseCVResult>(new OCRResult(res)));
+  }
+  return base_results;
+}
+
+std::vector<std::unique_ptr<BaseCVResult>>
+_OCRPipeline::Predict(const std::vector<cv::Mat> &input) {
+  if (use_doc_preprocessor_) {
+    INFOE("Mat input does not support doc preprocessor.");
+    exit(-1);
+  }
+
+  auto model_settings = GetModelSettings();
+  auto batches = batch_sampler_ptr_->Apply(input);
+  if (!batches.ok()) {
+    INFOE("pipeline get sample fail : %s", batches.status().ToString().c_str());
+    exit(-1);
+  }
+
+  std::vector<std::unique_ptr<BaseCVResult>> base_results = {};
+  pipeline_result_vec_.clear();
+  for (auto &batch : batches.value()) {
+    std::vector<DocPreprocessorPipelineResult>
+        doc_preprocessors_pipeline_results = {};
+    for (auto &image : batch) {
+      DocPreprocessorPipelineResult result;
+      result.output_image = image.clone();
+      doc_preprocessors_pipeline_results.push_back(result);
+    }
+    auto batch_results =
+        BuildResults(doc_preprocessors_pipeline_results, nullptr, nullptr,
+                     model_settings);
+    base_results.insert(base_results.end(),
+                        std::make_move_iterator(batch_results.begin()),
+                        std::make_move_iterator(batch_results.end()));
+  }
+  return base_results;
+}
+
+std::vector<std::unique_ptr<BaseCVResult>>
 _OCRPipeline::Predict(const std::vector<std::string> &input) {
   auto model_settings = GetModelSettings();
   auto batches = batch_sampler_ptr_->Apply(input);
@@ -287,16 +475,9 @@ _OCRPipeline::Predict(const std::vector<std::string> &input) {
           batches_string.status().ToString().c_str());
     exit(-1);
   }
-  auto input_path = batch_sampler_ptr_->InputPath();
-  int index = 0;
-  std::vector<cv::Mat> origin_image = {};
   std::vector<std::unique_ptr<BaseCVResult>> base_results = {};
   pipeline_result_vec_.clear();
   for (int i = 0; i < batches.value().size(); i++) {
-    origin_image.reserve(batches.value()[i].size());
-    for (const auto &mat : batches.value()[i]) {
-      origin_image.push_back(mat.clone());
-    }
     std::vector<DocPreprocessorPipelineResult>
         doc_preprocessors_pipeline_results = {};
     if (use_doc_preprocessor_) {
@@ -312,147 +493,25 @@ _OCRPipeline::Predict(const std::vector<std::string> &input) {
         doc_preprocessors_pipeline_results.push_back(result);
       }
     }
-    std::vector<cv::Mat> doc_preprocessor_pipeline_images = {};
-    std::vector<cv::Mat> doc_preprocessor_pipeline_images_copy = {};
-    for (auto &item : doc_preprocessors_pipeline_results) {
-      doc_preprocessor_pipeline_images.push_back(item.output_image);
-      doc_preprocessor_pipeline_images_copy.push_back(
-          item.output_image.clone());
-    }
-    text_det_model_->Predict(doc_preprocessor_pipeline_images_copy);
-    std::vector<TextDetPredictorResult> det_results =
-        static_cast<TextDetPredictor *>(text_det_model_.get())
-            ->PredictorResult();
-    std::vector<std::vector<std::vector<cv::Point2f>>> dt_polys_list = {};
-    for (auto &item : det_results) {
-      if (!item.dt_polys.empty()) {
-        auto sort_item = sort_boxes_(item.dt_polys);
-        dt_polys_list.push_back(sort_item);
-      } else {
-        dt_polys_list.push_back(std::vector<std::vector<cv::Point2f>>{});
-      }
-    }
-
-    std::vector<int> indices = {};
-    for (int j = 0; j < doc_preprocessor_pipeline_images.size(); j++) {
-      if (!dt_polys_list.empty() && !dt_polys_list[j].empty()) {
-        indices.push_back(j);
-      }
-    }
-    std::vector<OCRPipelineResult> results(
-        doc_preprocessor_pipeline_images.size());
-    for (int k = 0; k < results.size(); k++, index++) {
-      results[k].input_path = input_path[index];
-      results[k].doc_preprocessor_res = doc_preprocessors_pipeline_results[k];
-      results[k].dt_polys = dt_polys_list[k];
-      results[k].model_settings = model_settings;
-      results[k].text_det_params = text_det_params_;
-      results[k].text_type = text_type_;
-      results[k].text_rec_score_thresh = text_rec_score_thresh_;
-    }
-    if (!indices.empty()) {
-      std::vector<cv::Mat> all_subs_of_imgs = {};
-      std::vector<cv::Mat> all_subs_of_imgs_copy = {};
-      std::vector<int> chunk_indices(1, 0);
-      for (auto &idx : indices) {
-        auto result_all_subs_of_img = (*crop_by_polys_)(
-            doc_preprocessor_pipeline_images[idx], dt_polys_list[idx]);
-        if (!result_all_subs_of_img.ok()) {
-          INFOE("Split image fail : ",
-                result_all_subs_of_img.status().ToString().c_str());
-          exit(-1);
-        }
-        all_subs_of_imgs.insert(all_subs_of_imgs.end(),
-                                result_all_subs_of_img.value().begin(),
-                                result_all_subs_of_img.value().end());
-        chunk_indices.emplace_back(chunk_indices.back() +
-                                   result_all_subs_of_img.value().size());
-      }
-      for (auto &item : all_subs_of_imgs) {
-        all_subs_of_imgs_copy.push_back(item.clone());
-      }
-      std::vector<int> angles = {};
-      if (model_settings["use_textline_orientation"]) {
-        textline_orientation_model_->Predict(all_subs_of_imgs_copy);
-        auto textline_orientation_model_results =
-            static_cast<ClasPredictor *>(textline_orientation_model_.get())
-                ->PredictorResult();
-        textline_orientation_model_results[0].input_image;
-        for (auto &result_angle : textline_orientation_model_results) {
-          angles.push_back(result_angle.class_ids[0]);
-        }
-        auto result_all_subs_of_imgs = RotateImage(all_subs_of_imgs, angles);
-        if (!result_all_subs_of_imgs.ok()) {
-          INFOE("Rotate images fail : %s",
-                result_all_subs_of_imgs.status().ToString().c_str());
-          exit(-1);
-        }
-        all_subs_of_imgs = result_all_subs_of_imgs.value();
-      } else {
-        angles = std::vector<int>(all_subs_of_imgs.size(), -1);
-      }
-      for (int l = 0; l < indices.size(); l++) {
-        for (int m = chunk_indices[l]; m < chunk_indices[l + 1]; m++) {
-          results[indices[l]].textline_orientation_angles.push_back(angles[m]);
-        }
-      }
-      for (int l = 0; l < indices.size(); l++) {
-        std::vector<cv::Mat> all_subs_of_img = {};
-        for (int m = chunk_indices[l]; m < chunk_indices[l + 1]; m++) {
-          all_subs_of_img.push_back(all_subs_of_imgs[m]);
-        }
-        std::vector<std::pair<std::pair<int, float>, TextRecPredictorResult>>
-            sub_img_info_list = {};
-
-        for (int m = 0; m < all_subs_of_img.size(); m++) {
-          int sub_img_id = m;
-          float sub_img_ratio = (float)all_subs_of_img[m].size[1] /
-                                (float)all_subs_of_img[m].size[0];
-          TextRecPredictorResult result;
-          sub_img_info_list.push_back({{sub_img_id, sub_img_ratio}, result});
-        }
-        std::vector<std::pair<int, float>> sorted_subs_info = {};
-        for (auto &item : sub_img_info_list) {
-          sorted_subs_info.push_back(item.first);
-        }
-        std::sort(
-            sorted_subs_info.begin(), sorted_subs_info.end(),
-            [](const std::pair<int, float> &a, const std::pair<int, float> &b) {
-              return a.second < b.second;
-            });
-        std::vector<cv::Mat> sorted_subs_of_img = {};
-        for (auto &item : sorted_subs_info) {
-          sorted_subs_of_img.push_back(all_subs_of_img[item.first]);
-        }
-        text_rec_model_->Predict(sorted_subs_of_img);
-        auto text_rec_model_results =
-            static_cast<TextRecPredictor *>(text_rec_model_.get())
-                ->PredictorResult();
-        for (int m = 0; m < text_rec_model_results.size(); m++) {
-          int sub_img_id = sorted_subs_info[m].first;
-          sub_img_info_list[sub_img_id].second = text_rec_model_results[m];
-        }
-        for (int sno = 0; sno < sub_img_info_list.size(); sno++) {
-          auto rec_res = sub_img_info_list[sno].second;
-          if (rec_res.rec_score >= text_rec_score_thresh_) {
-            results[l].rec_texts.push_back(rec_res.rec_text);
-            results[l].rec_scores.push_back(rec_res.rec_score);
-            results[l].rec_polys.push_back(dt_polys_list[l][sno]);
-            results[l].vis_fonts = rec_res.vis_font;
-          }
-        }
-      }
-    }
-    for (auto &res : results) {
-      if (text_type_ == "general") {
-        res.rec_boxes =
-            ComponentsProcessor::ConvertPointsToBoxes(res.rec_polys);
-      }
-      pipeline_result_vec_.push_back(res);
-      base_results.push_back(std::unique_ptr<BaseCVResult>(new OCRResult(res)));
-    }
+    const std::vector<std::string> *det_input_paths =
+        use_doc_preprocessor_ ? nullptr : &batches_string.value()[i];
+    auto batch_results =
+        BuildResults(doc_preprocessors_pipeline_results, det_input_paths,
+                     &batches_string.value()[i], model_settings);
+    base_results.insert(base_results.end(),
+                        std::make_move_iterator(batch_results.begin()),
+                        std::make_move_iterator(batch_results.end()));
   }
   return base_results;
+}
+
+std::vector<std::unique_ptr<BaseCVResult>>
+OCRPipeline::Predict(const std::vector<cv::Mat> &input) {
+  if (thread_num_ != 1) {
+    INFOE("Mat input only supports thread_num=1.");
+    exit(-1);
+  }
+  return static_cast<_OCRPipeline *>(infer_.get())->Predict(input);
 }
 
 std::vector<std::unique_ptr<BaseCVResult>>
