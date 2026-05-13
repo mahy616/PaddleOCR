@@ -14,7 +14,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 #include <exception>
 #include <fstream>
 #include <memory>
@@ -31,15 +30,9 @@ struct OCRConfigCompat {
   bool use_gpu;
 };
 
-struct OCRPointCompat {
-  int x;
-  int y;
-};
-
 struct OCRResultCompat {
-  OCRPointCompat box[4];
-  int box_count;
-  char *text;
+  std::vector<std::vector<int>> box;
+  std::string text;
   double score;
 };
 
@@ -138,15 +131,6 @@ bool HasModelFiles(const std::string &model_dir) {
   return has_model && has_params && has_config;
 }
 
-char *CopyCString(const std::string &value) {
-  char *buffer = new char[value.size() + 1];
-  if (!value.empty()) {
-    std::memcpy(buffer, value.data(), value.size());
-  }
-  buffer[value.size()] = '\0';
-  return buffer;
-}
-
 std::string ReadModelName(const std::string &model_dir) {
   std::string yaml_path = JoinPath(model_dir, "inference.yml");
   if (!Exists(yaml_path)) {
@@ -243,16 +227,15 @@ void FillResult(const OCRPipelineResult &pipeline_result,
 
   for (size_t i = 0; i < count; ++i) {
     OCRResultCompat *item = new OCRResultCompat();
-    item->text = CopyCString(pipeline_result.rec_texts[i]);
+    item->text = pipeline_result.rec_texts[i];
     item->score = pipeline_result.rec_scores[i];
-    item->box_count = 0;
 
     const auto &poly = pipeline_result.rec_polys[i];
     size_t point_count = std::min<size_t>(poly.size(), 4);
+    item->box.reserve(point_count);
     for (size_t j = 0; j < point_count; ++j) {
-      item->box[j].x = static_cast<int>(std::lround(poly[j].x));
-      item->box[j].y = static_cast<int>(std::lround(poly[j].y));
-      ++item->box_count;
+      item->box.push_back({static_cast<int>(std::lround(poly[j].x)),
+                           static_cast<int>(std::lround(poly[j].y))});
     }
     out->push_back(item);
   }
@@ -329,7 +312,6 @@ FreeMemory(OCRResultCompat **results, int result_count) {
     return;
   }
   for (int i = 0; i < result_count; ++i) {
-    delete[] results[i]->text;
     delete results[i];
   }
   delete[] results;
