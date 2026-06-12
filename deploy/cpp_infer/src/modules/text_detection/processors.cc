@@ -173,17 +173,8 @@ DetResizeForTest::ResizeImageType1(const cv::Mat &img) const {
 absl::StatusOr<cv::Mat>
 DetResizeForTest::ResizeImageType2(const cv::Mat &img) const {
   int h = img.rows, w = img.cols;
+  int max_stride = 32;
   int resize_h = h, resize_w = w;
-  float ratio;
-  if (resize_h > resize_w)
-    ratio = float(resize_long_) / resize_h;
-  else
-    ratio = float(resize_long_) / resize_w;
-
-  resize_h = int(resize_h * ratio);
-  resize_w = int(resize_w * ratio);
-
-  int max_stride = 128;
   resize_h = ((resize_h + max_stride - 1) / max_stride) * max_stride;
   resize_w = ((resize_w + max_stride - 1) / max_stride) * max_stride;
 
